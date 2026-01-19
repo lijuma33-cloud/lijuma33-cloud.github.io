@@ -35,13 +35,15 @@
     const { useState, useEffect, useRef } = React;
 
     // ========== CONFIGURA AQUI TU FIREBASE ==========
-    // Reemplaza con la configuración de tu app Web en Firebase Console
-    // Ve a: Project settings -> General -> Your apps -> Firebase SDK snippet -> Config
+    // Config enviada por el usuario
     const firebaseConfig = {
-      apiKey: "REEMPLAZA_CON_TU_apiKey",
-      authDomain: "REEMPLAZA_CON_TU_authDomain",
-      projectId: "REEMPLAZA_CON_TU_projectId",
-      // opcionales: storageBucket, messagingSenderId, appId
+      apiKey: "AIzaSyCyXRaOwSCyHLvp1wMqO3uueQHd3hnUAKM",
+      authDomain: "turnos2-317fa.firebaseapp.com",
+      projectId: "turnos2-317fa",
+      storageBucket: "turnos2-317fa.firebasestorage.app",
+      messagingSenderId: "386233629813",
+      appId: "1:386233629813:web:2ca88b397f236c3d77cc3c",
+      measurementId: "G-97CNNPYTG5"
     };
 
     if (!firebase.apps.length) {
