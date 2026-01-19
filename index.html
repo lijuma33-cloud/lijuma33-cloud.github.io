@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>QueueFlow Pro - Firestore</title>
+  <title>QueueFlow Pro - Firestore (Modular SDK)</title>
 
   <!-- Tailwind (CDN) -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -14,10 +14,6 @@
 
   <!-- Babel (para JSX en el navegador; para producción pref. hacer build) -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-  <!-- Firebase compat SDKs (fácil integración desde archivo estático) -->
-  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore-compat.js"></script>
 
   <style>
     @keyframes pulse-slow {
@@ -31,11 +27,29 @@
 <body>
   <div id="root"></div>
 
-  <script type="text/babel">
-    const { useState, useEffect, useRef } = React;
+  <!-- =======================
+       Firebase modular SDK
+       ======================= -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-app.js";
+    import {
+      getFirestore,
+      collection,
+      addDoc,
+      doc,
+      setDoc,
+      deleteDoc,
+      writeBatch,
+      runTransaction,
+      serverTimestamp,
+      onSnapshot,
+      query,
+      orderBy,
+      limit,
+      getDocs
+    } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js";
 
-    // ========== CONFIGURA AQUI TU FIREBASE ==========
-    // Config enviada por el usuario
+    // ====== Inserta aquí tu config (la que pegaste) ======
     const firebaseConfig = {
       apiKey: "AIzaSyCyXRaOwSCyHLvp1wMqO3uueQHd3hnUAKM",
       authDomain: "turnos2-317fa.firebaseapp.com",
@@ -46,14 +60,117 @@
       measurementId: "G-97CNNPYTG5"
     };
 
-    if (!firebase.apps.length) {
-      firebase.initializeApp(firebaseConfig);
-    }
-    const db = firebase.firestore();
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
 
-    // ========== APP ==========
+    // API expuesta a la app React (usa la SDK modular internamente)
+    window.firebaseApi = {
+      // Listeners que devuelven funciones unsubscribe
+      onQueueSnapshot: (cb) => {
+        const q = query(collection(db, 'queue'), orderBy('priority'), orderBy('createdAt'));
+        const unsub = onSnapshot(q, snap => {
+          const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          cb(items);
+        }, err => console.error('queue onSnapshot error', err));
+        return unsub;
+      },
+
+      onCurrentSnapshot: (cb) => {
+        const ref = doc(db, 'meta', 'current');
+        const unsub = onSnapshot(ref, snap => {
+          cb(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+        }, err => console.error('current onSnapshot error', err));
+        return unsub;
+      },
+
+      onCountSnapshot: (cb) => {
+        const ref = doc(db, 'meta', 'count');
+        const unsub = onSnapshot(ref, snap => {
+          cb(snap.exists() ? (snap.data().value || 0) : 0);
+        }, err => console.error('count onSnapshot error', err));
+        return unsub;
+      },
+
+      // Generar turno (transacción segura)
+      generateTurn: async (type, clientName) => {
+        const prefix = type === 'P' ? 'P' : 'C';
+        const countRef = doc(db, 'meta', 'count');
+
+        await runTransaction(db, async (tx) => {
+          const snap = await tx.get(countRef);
+          const current = snap.exists() ? (snap.data().value || 0) : 0;
+          const next = current + 1;
+
+          const newTurn = {
+            number: `${prefix}-${next}`,
+            clientName: clientName && clientName.trim() !== '' ? clientName.trim() : "Cliente",
+            type,
+            priority: type === 'P' ? 1 : 2,
+            createdAt: serverTimestamp()
+          };
+
+          await addDoc(collection(db, 'queue'), newTurn);
+          tx.set(countRef, { value: next }, { merge: true });
+        });
+      },
+
+      // Llamar siguiente (transacción)
+      callNext: async (stationName) => {
+        const q = query(collection(db, 'queue'), orderBy('priority'), orderBy('createdAt'), limit(1));
+        const snap = await getDocs(q);
+        if (snap.empty) return null;
+
+        const docSnap = snap.docs[0];
+        const docRef = doc(db, 'queue', docSnap.id);
+        const currentRef = doc(db, 'meta', 'current');
+
+        await runTransaction(db, async (tx) => {
+          const fresh = await tx.get(docRef);
+          if (!fresh.exists()) throw new Error('Turno ya tomado por otra instancia');
+
+          const data = fresh.data();
+          const turnCalled = {
+            id: docRef.id,
+            number: data.number,
+            clientName: data.clientName,
+            type: data.type,
+            station: stationName,
+            timestamp: Date.now()
+          };
+
+          tx.delete(docRef);
+          tx.set(currentRef, turnCalled);
+        });
+
+        return true;
+      },
+
+      // Reiniciar sistema (batch). Para muchos docs usar Cloud Function.
+      resetSystem: async () => {
+        // Borrar todos los docs de 'queue' y resetear meta/current y meta/count
+        const qSnap = await getDocs(collection(db, 'queue'));
+        const batch = writeBatch(db);
+        qSnap.docs.forEach(d => batch.delete(d.ref));
+        const currentRef = doc(db, 'meta', 'current');
+        const countRef = doc(db, 'meta', 'count');
+        batch.delete(currentRef);
+        batch.set(countRef, { value: 0 }, { merge: true });
+        await batch.commit();
+      },
+
+      // Para debug: opciones de app
+      appOptions: () => app.options
+    };
+  </script>
+
+  <!-- =======================
+       React app (usa window.firebaseApi)
+       ======================= -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
     const App = () => {
-      const [view, setView] = useState('kiosk'); 
+      const [view, setView] = useState('kiosk');
       const [queue, setQueue] = useState([]);
       const [currentTurn, setCurrentTurn] = useState(null);
       const [historyCount, setHistoryCount] = useState(0);
@@ -63,35 +180,26 @@
 
       const lastAnnouncedId = useRef(null);
 
-      // Listeners Firestore: cola, current, contador
       useEffect(() => {
-        const queueUnsub = db.collection('queue')
-          .orderBy('priority')
-          .orderBy('createdAt')
-          .onSnapshot(snap => {
-            const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            setQueue(items);
-          }, err => {
-            console.error('Error queue listener', err);
-          });
+        if (!window.firebaseApi) {
+          console.error('firebaseApi no inicializado aún');
+          return;
+        }
 
-        const currentUnsub = db.collection('meta').doc('current')
-          .onSnapshot(doc => {
-            setCurrentTurn(doc.exists ? doc.data() : null);
-            const data = doc.exists ? doc.data() : null;
-            if (data && data.id !== lastAnnouncedId.current && view === 'display' && audioEnabled) {
-              announceTurn(data);
-              lastAnnouncedId.current = data.id;
-            }
-          }, err => console.error('Error current listener', err));
-
-        const countUnsub = db.collection('meta').doc('count')
-          .onSnapshot(doc => {
-            setHistoryCount(doc.exists ? (doc.data().value || 0) : 0);
-          }, err => console.error('Error count listener', err));
+        const qUnsub = window.firebaseApi.onQueueSnapshot(items => setQueue(items));
+        const curUnsub = window.firebaseApi.onCurrentSnapshot(data => {
+          setCurrentTurn(data);
+          if (data && data.id !== lastAnnouncedId.current && view === 'display' && audioEnabled) {
+            announceTurn(data);
+            lastAnnouncedId.current = data.id;
+          }
+        });
+        const countUnsub = window.firebaseApi.onCountSnapshot(c => setHistoryCount(c));
 
         return () => {
-          queueUnsub(); currentUnsub(); countUnsub();
+          qUnsub && qUnsub();
+          curUnsub && curUnsub();
+          countUnsub && countUnsub();
         };
       }, [view, audioEnabled]);
 
@@ -118,88 +226,31 @@
       };
 
       const generateTurn = async (type) => {
-        const prefix = type === 'P' ? 'P' : 'C';
-        const client = clientName.trim() || "Cliente";
-        const countRef = db.collection('meta').doc('count');
-
         try {
-          await db.runTransaction(async (tx) => {
-            const snap = await tx.get(countRef);
-            const current = snap.exists ? (snap.data().value || 0) : 0;
-            const next = current + 1;
-
-            const newTurn = {
-              number: `${prefix}-${next}`,
-              clientName: client,
-              type,
-              priority: type === 'P' ? 1 : 2,
-              createdAt: firebase.firestore.FieldValue.serverTimestamp()
-            };
-
-            await db.collection('queue').add(newTurn);
-            tx.set(countRef, { value: next }, { merge: true });
-          });
-
+          await window.firebaseApi.generateTurn(type, clientName);
           setClientName('');
         } catch (err) {
-          console.error('Error generando turno', err);
+          console.error('generateTurn error', err);
           alert('No se pudo generar el turno. Intente de nuevo.');
         }
       };
 
       const callNext = async () => {
         try {
-          const qSnapshot = await db.collection('queue')
-            .orderBy('priority')
-            .orderBy('createdAt')
-            .limit(1)
-            .get();
-
-          if (qSnapshot.empty) return;
-
-          const doc = qSnapshot.docs[0];
-          const docRef = doc.ref;
-          const currentRef = db.collection('meta').doc('current');
-
-          await db.runTransaction(async (tx) => {
-            const fresh = await tx.get(docRef);
-            if (!fresh.exists) throw new Error('Turno ya tomado por otra instancia');
-
-            const data = fresh.data();
-            const turnCalled = {
-              id: docRef.id,
-              number: data.number,
-              clientName: data.clientName,
-              type: data.type,
-              station: stationName,
-              timestamp: Date.now()
-            };
-
-            tx.delete(docRef);
-            tx.set(currentRef, turnCalled);
-          });
-
+          await window.firebaseApi.callNext(stationName);
         } catch (err) {
-          console.warn('No se pudo tomar el turno (posible competencia):', err);
+          console.warn('callNext error', err);
+          alert('No se pudo tomar el siguiente turno (competencia).');
         }
       };
 
       const resetSystem = async () => {
         if (!confirm('¿Desea reiniciar todos los turnos del día?')) return;
-
         try {
-          const q = await db.collection('queue').get();
-          const batch = db.batch();
-          q.docs.forEach(d => batch.delete(d.ref));
-          const currentRef = db.collection('meta').doc('current');
-          const countRef = db.collection('meta').doc('count');
-          batch.delete(currentRef);
-          batch.set(countRef, { value: 0 }, { merge: true });
-
-          await batch.commit();
+          await window.firebaseApi.resetSystem();
           alert('Sistema reiniciado');
         } catch (err) {
-          console.error('Error al reiniciar', err);
+          console.error('resetSystem error', err);
           alert('No se pudo reiniciar. Revisa la consola.');
         }
       };
@@ -323,10 +374,10 @@
                       <div className="text-[8rem] md:text-[14rem] font-black text-white leading-none tracking-tighter">{currentTurn?.number || '---'}</div>
                       <div className="text-4xl text-blue-300 font-black mt-6 truncate uppercase">{currentTurn?.clientName || ''}</div>
                     </div>
-                    <div className="mt-12">
-                      <p className="text-slate-500 text-2xl font-bold mb-4 uppercase tracking-widest">DIRIGIRSE A</p>
-                      <p className="text-white text-6xl md:text-8xl font-black uppercase tracking-tighter text-blue-500">{currentTurn?.station || 'ESPERANDO'}</p>
-                    </div>
+                      <div className="mt-12">
+                        <p className="text-slate-500 text-2xl font-bold mb-4 uppercase tracking-widest">DIRIGIRSE A</p>
+                        <p className="text-white text-6xl md:text-8xl font-black uppercase tracking-tighter text-blue-500">{currentTurn?.station || 'ESPERANDO'}</p>
+                      </div>
                   </div>
                   <div className="w-full md:w-[400px] bg-slate-900 p-12">
                     <h3 className="text-slate-500 font-black text-xl mb-10 tracking-widest border-b border-slate-800 pb-4">PRÓXIMOS</h3>
@@ -350,7 +401,7 @@
           </main>
 
           <footer className="p-4 text-center text-slate-400 text-[10px] font-bold uppercase tracking-[0.5em]">
-            QueueFlow + Firestore • Sin Conexión P2P Requerida
+            QueueFlow + Firestore (Modular) • Sin Conexión P2P Requerida
           </footer>
         </div>
       );
